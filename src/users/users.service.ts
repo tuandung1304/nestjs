@@ -15,4 +15,10 @@ export class UsersService {
       throw new BadRequestException('Email already exists');
     }
   }
+
+  async findByEmail(email: string) {
+    return this.prisma.user.findUnique({
+      where: { email },
+    });
+  }
 }
