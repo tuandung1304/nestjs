@@ -6,7 +6,7 @@ on:
 
 jobs:
   deploy:
-    name: Deploy NestJS app to EC2 instance
+    name: Deploy NestJS app to EC2
     runs-on: ubuntu-latest
     environment: ec2-server
 
@@ -19,14 +19,21 @@ jobs:
         with:
           node-version: 20
 
-      - name: Install dependencies
-        run: npm install --frozen-lockfile
+      - name: Cache node_modules
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: ${{ runner.os }}-node-${{ hashFiles('yarn.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-node-
 
-      - name: Run lint
-        run: yarn lint
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile
 
       - name: Run tests
-        run: yarn test
+        run: |
+          yarn prisma generate
+          yarn test
 
       - name: Build project
         run: yarn build
@@ -34,7 +41,7 @@ jobs:
       - name: Archive dist and production files
         run: |
           mkdir deploy
-          cp -r dist deploy/
+          cp -r dist generated prisma deploy/
           cp package.json yarn.lock deploy/
           tar czf deploy.tar.gz -C deploy .
 
@@ -45,7 +52,7 @@ jobs:
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
           source: 'deploy.tar.gz'
-          target: '/var/www/nest-app'
+          target: '/var/www/nest-app/releases'
 
       - name: SSH and finalize on EC2
         uses: appleboy/ssh-action@v1.0.0
@@ -54,12 +61,22 @@ jobs:
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
-            cd /var/www/nest-app || exit 1
-            tar xzf deploy.tar.gz
+            set -e
+            cd /var/www/nest-app/releases
+            TIMESTAMP=$(date +%Y%m%d%H%M%S)
+            mkdir $TIMESTAMP
+            tar xzf deploy.tar.gz -C $TIMESTAMP
             rm deploy.tar.gz
+
+            cd $TIMESTAMP
             yarn install --frozen-lockfile --production
             echo "DATABASE_URL=${{ secrets.DATABASE_URL }}" > .env
-            echo "ACCESS_TOKEN_SECRET=${{ secrets.ACCESS_TOKEN_SECRET }}" > .env
-            echo "REFRESH_TOKEN_SECRET=${{ secrets.REFRESH_TOKEN_SECRET }}" > .env
-            echo "PORT=${{ vars.PORT }}" > .env
-            pm2 restart main || pm2 start dist/main.js --name main --env production
+            echo "ACCESS_TOKEN_SECRET=${{ secrets.ACCESS_TOKEN_SECRET }}" >> .env
+            echo "REFRESH_TOKEN_SECRET=${{ secrets.REFRESH_TOKEN_SECRET }}" >> .env
+            echo "PORT=${{ vars.PORT }}" >> .env
+            yarn prisma generate
+            yarn prisma migrate deploy
+
+            ln -sfn /var/www/nest-app/releases/$TIMESTAMP /var/www/nest-app/current
+
+            pm2 restart main || pm2 start /var/www/nest-app/current/dist/main.js --name main --env production
